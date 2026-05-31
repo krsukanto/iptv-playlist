@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IPTV-Org Web Explorer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>IPTV-Org Web Explorer</h1>
+
+        <div class="tabs">
+            <button class="tab-btn active" id="baseTabBtn">Base Playlist</button>
+            <button class="tab-btn" id="masterTabBtn">Master List</button>
+        </div>
+
+        <div class="controls">
+            <input type="text" id="m3uUrl" placeholder="M3U Playlist URL" style="flex-grow: 2;" value="https://iptv-org.github.io/iptv/index.m3u">
+            <div class="checkbox-group">
+                <input type="checkbox" id="validateStreams">
+                <label for="validateStreams">Force Re-Validate</label>
+            </div>
+            <button id="syncDbBtn">Parse Playlist</button>
+        </div>
+
+        <div class="controls secondary">
+            <div class="filter-group">
+                <input type="text" id="searchName" placeholder="Channel Name">
+                <select id="searchCategory">
+                    <option value="">All Categories</option>
+                </select>
+                <select id="statusFilter">
+                    <option value="all">All Status</option>
+                    <option value="working">Working Only</option>
+                </select>
+            </div>
+            <button id="addToMasterBtn" style="background-color: #28a745;">Add Current to Master</button>
+            <button id="removeFromMasterBtn" style="background-color: #dc3545; display: none;">Remove Current from Master</button>
+            <button id="exportMasterM3uBtn" style="background-color: #ffc107; color: #000; display: none;">Export Master M3U</button>
+            <button id="exportCsvBtn">Export Filtered CSV</button>
+        </div>
+
+        <div id="statusMessage" class="status">Ready</div>
+
+        <div class="table-container">
+            <table id="dataTable">
+                <thead>
+                    <tr>
+                        <th>Logo</th>
+                        <th>Name</th>
+                        <th>Category</th>
+                        <th>Status</th>
+                        <th>Stream URL</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- Data will be inserted here by JavaScript -->
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
