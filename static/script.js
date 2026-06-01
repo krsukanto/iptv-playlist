@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const exportMasterM3uBtn = document.getElementById('exportMasterM3uBtn');
     const exportCsvBtn = document.getElementById('exportCsvBtn');
     const statusMessage = document.getElementById('statusMessage');
+    const selectAllCheckbox = document.getElementById('selectAll');
     const dataTableBody = document.querySelector('#dataTable tbody');
 
     let debounceTimer, isMasterFilterActive = false;
@@ -58,6 +59,8 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`/api/filter_data?${params.toString()}`);
             const result = await response.json();
+            
+            selectAllCheckbox.checked = false; // Reset select all on new data
 
             if (result.status === 'success') {
                 dataTableBody.innerHTML = ''; // Clear existing data
@@ -66,6 +69,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const masterBadge = row.is_master === 1 ? '⭐ ' : '';
                     const tr = document.createElement('tr');
                     tr.innerHTML = `
+                        <td><input type="checkbox" class="channel-checkbox" value="${row.url}"></td>
                         <td>${row.logo ? `<img src="${row.logo}" width="40" height="30" style="object-fit: contain;">` : ''}</td>
                         <td>${masterBadge}${row.name || ''}</td>
                         <td>${row.category || ''}</td>
@@ -77,13 +81,18 @@ document.addEventListener('DOMContentLoaded', () => {
                 updateStatus(`Showing ${result.displayed_count} of ${result.total_filtered} filtered results.`);
             } else {
                 updateStatus(`Error: ${result.message}`, 'error');
-                dataTableBody.innerHTML = '<tr><td colspan="5">Error loading data.</td></tr>';
+                dataTableBody.innerHTML = '<tr><td colspan="6">Error loading data.</td></tr>';
             }
         } catch (error) {
             updateStatus(`Network error: ${error.message}`, 'error');
-            dataTableBody.innerHTML = '<tr><td colspan="5">Network error loading data.</td></tr>';
+            dataTableBody.innerHTML = '<tr><td colspan="6">Network error loading data.</td></tr>';
         }
     }
+
+    selectAllCheckbox.addEventListener('change', () => {
+        const checkboxes = document.querySelectorAll('.channel-checkbox');
+        checkboxes.forEach(cb => cb.checked = selectAllCheckbox.checked);
+    });
 
     // Event listener for Sync button
     syncDbBtn.addEventListener('click', async () => {
@@ -114,13 +123,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     addToMasterBtn.addEventListener('click', async () => {
-        updateStatus('Adding working channels to Master List...');
+        const selectedUrls = Array.from(document.querySelectorAll('.channel-checkbox:checked')).map(cb => cb.value);
+        const msg = selectedUrls.length > 0 ? `Adding ${selectedUrls.length} selected channels...` : 'Adding working channels from current view...';
+        updateStatus(msg);
+
         const response = await fetch('/api/add_to_master', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 search: searchNameInput.value,
-                category: searchCategoryInput.value
+                category: searchCategoryInput.value,
+                urls: selectedUrls.length > 0 ? selectedUrls : null
             })
         });
         const result = await response.json();
@@ -129,13 +142,17 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     removeFromMasterBtn.addEventListener('click', async () => {
-        updateStatus('Removing channels from Master List...');
+        const selectedUrls = Array.from(document.querySelectorAll('.channel-checkbox:checked')).map(cb => cb.value);
+        const msg = selectedUrls.length > 0 ? `Removing ${selectedUrls.length} selected channels...` : 'Removing filtered channels from Master List...';
+        updateStatus(msg);
+
         const response = await fetch('/api/remove_from_master', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 search: searchNameInput.value,
-                category: searchCategoryInput.value
+                category: searchCategoryInput.value,
+                urls: selectedUrls.length > 0 ? selectedUrls : null
             })
         });
         const result = await response.json();

@@ -5,10 +5,13 @@ import json
 import os
 import re
 import logging
+import threading
+import concurrent.futures
 from flask import Flask, render_template, request, jsonify, send_file
 import xml.etree.ElementTree as ET
 import io
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 # Configure logging to overwrite log.txt on every run
 logging.basicConfig(
@@ -25,6 +28,9 @@ app.config['SECRET_KEY'] = os.urandom(24) # Generates a random 24-byte key
 DB_PATH = "iptv_data.db"
 DOWNLOAD_DIR = "downloads"
 DEFAULT_M3U_URL = "https://iptv-org.github.io/iptv/countries/in.m3u"
+
+# Global lock to prevent multiple simultaneous syncs
+sync_lock = threading.Lock()
 
 def _normalize_name(name):
     """Lowercases and strips all non-alphanumeric characters for fuzzy matching."""
@@ -88,9 +94,9 @@ def _check_stream_status(channel):
     """
     try:
         # Use stream=True and a short timeout to avoid downloading the whole stream
-        response = requests.get(channel['url'], timeout=5, stream=True, allow_redirects=True)
-        if response.status_code < 400:
-            return channel
+        with requests.get(channel['url'], timeout=(5, 5), stream=True, allow_redirects=True) as response:
+            if response.status_code < 400:
+                return channel
     except Exception:
         pass
     return None
@@ -193,30 +199,37 @@ def _sync_and_consolidate_data(m3u_url, validate=False):
 
         # Automatic validation for channels with unknown status (NULL)
         # OR full validation if user checked the box
-        query = "SELECT * FROM channels" if validate else "SELECT * FROM channels WHERE is_working IS NULL"
+        query = "SELECT url FROM channels" if validate else "SELECT url FROM channels WHERE is_working IS NULL"
         df_to_check = pd.read_sql_query(query, conn)
         
         if not df_to_check.empty:
             channels_to_check = df_to_check.to_dict('records')
-            logger.info(f"Validating {len(channels_to_check)} channels...")
+            total = len(channels_to_check)
+            logger.info(f"Validating {total} channels... (Started at {datetime.now()})")
             
             with ThreadPoolExecutor(max_workers=50) as executor:
-                results = list(executor.map(_check_stream_status, channels_to_check))
+                futures = {executor.submit(_check_stream_status, c): c for c in channels_to_check}
+                
+                completed = 0
+                for future in concurrent.futures.as_completed(futures):
+                    original = futures[future]
+                    result = future.result()
+                    status = 1 if result else 0
+                    cursor.execute("UPDATE channels SET is_working = ? WHERE url = ?", (status, original['url']))
+                    
+                    completed += 1
+                    if completed % 100 == 0:
+                        conn.commit()
+                        logger.info(f"Validation progress: {completed}/{total} ({(completed/total)*100:.1f}%)")
             
-            # Update results back to DB
-            for original, result in zip(channels_to_check, results):
-                status = 1 if result else 0
-                cursor.execute("UPDATE channels SET is_working = ? WHERE url = ?", (status, original['url']))
             conn.commit()
 
         # Run EPG mapping after sync
         _auto_map_epg_ids()
-
         conn.close()
-        return {"status": "success", "message": "Playlist processed, validated, and EPG IDs mapped."}
+        logger.info(f"Database sync complete at {datetime.now()}")
     except Exception as e:
         logger.exception("M3U sync failed")
-        return {"status": "error", "message": str(e)}
 
 def _get_filtered_data(search_query="", category_query="", master_only="false", status_filter="all"):
     if not os.path.exists(DB_PATH):
@@ -257,12 +270,22 @@ def index():
 @app.route('/api/sync_db', methods=['POST'])
 def sync_db():
     """API endpoint to trigger database synchronization."""
+    if sync_lock.locked():
+        return jsonify({"status": "warning", "message": "A synchronization is already in progress. Please check log.txt for status."})
+
     data = request.get_json() or {}
     m3u_url = data.get('url', DEFAULT_M3U_URL)
     validate = data.get('validate', False)
+    
     logger.info(f"Manual sync triggered for: {m3u_url} (Validate: {validate})")
-    result = _sync_and_consolidate_data(m3u_url, validate=validate)
-    return jsonify(result)
+    
+    # Start the sync in a background thread
+    def run_sync():
+        with sync_lock:
+            _sync_and_consolidate_data(m3u_url, validate=validate)
+            
+    threading.Thread(target=run_sync).start()
+    return jsonify({"status": "success", "message": "Synchronization started in the background. You can browse the app while it processes. Check log.txt for progress."})
 
 @app.route('/api/filter_data', methods=['GET'])
 def filter_data():
@@ -312,16 +335,20 @@ def get_categories():
 
 @app.route('/api/add_to_master', methods=['POST'])
 def add_to_master():
-    """Adds the current filtered selection to the master list (working channels only)."""
+    """Adds the current filtered selection OR specific URLs to the master list."""
     data = request.get_json() or {}
-    search = data.get('search', '')
-    category = data.get('category', '')
-    
-    df, error = _get_filtered_data(search, category)
-    if error or df.empty:
-        return jsonify({"status": "error", "message": "No channels found to add."})
+    urls = data.get('urls')
 
-    urls = df[df['is_working'] == 1]['url'].tolist()
+    if not urls:
+        search = data.get('search', '')
+        category = data.get('category', '')
+        df, error = _get_filtered_data(search, category)
+        if error or df.empty:
+            return jsonify({"status": "error", "message": "No channels found to add."})
+        urls = df[df['is_working'] == 1]['url'].tolist()
+
+    if not urls:
+        return jsonify({"status": "error", "message": "No working channels to add."})
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -334,17 +361,21 @@ def add_to_master():
 
 @app.route('/api/remove_from_master', methods=['POST'])
 def remove_from_master():
-    """Removes the current filtered selection from the master list."""
+    """Removes the current filtered selection OR specific URLs from the master list."""
     data = request.get_json() or {}
-    search = data.get('search', '')
-    category = data.get('category', '')
-    
-    # We filter within the master list only
-    df, error = _get_filtered_data(search, category, master_only='true')
-    if error or df.empty:
-        return jsonify({"status": "error", "message": "No master channels found to remove."})
+    urls = data.get('urls')
 
-    urls = df['url'].tolist()
+    if not urls:
+        search = data.get('search', '')
+        category = data.get('category', '')
+        # We filter within the master list only
+        df, error = _get_filtered_data(search, category, master_only='true')
+        if error or df.empty:
+            return jsonify({"status": "error", "message": "No master channels found to remove."})
+        urls = df['url'].tolist()
+
+    if not urls:
+        return jsonify({"status": "error", "message": "No channels selected to remove."})
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
